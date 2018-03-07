@@ -5,6 +5,7 @@ Makefile.in
 aclocal.m4
 autom4te.cache/
 browser-plugin/*
+.idea/
 config.h
 config.h.in
 config.log

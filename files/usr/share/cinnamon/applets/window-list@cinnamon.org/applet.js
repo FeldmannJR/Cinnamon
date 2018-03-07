@@ -72,38 +72,51 @@ const FLASH_INTERVAL = 500;
 const WINDOW_PREVIEW_WIDTH = 200;
 const WINDOW_PREVIEW_HEIGHT = 150;
 
-function WindowPreview(item, metaWindow, previewScale, showLabel) {
-    this._init(item, metaWindow, previewScale, showLabel);
+function WindowPreview(item, metaWindow) {
+    this._init(item, metaWindow);
 }
 
 WindowPreview.prototype = {
     __proto__: Tooltips.TooltipBase.prototype,
 
-    _init: function(item, metaWindow, previewScale, showLabel) {
+    _init: function(item, metaWindow) {
         Tooltips.TooltipBase.prototype._init.call(this, item.actor);
         this._applet = item._applet;
-        this.uiScale = St.ThemeContext.get_for_stage(global.stage).scale_factor;
-        this.thumbScale = previewScale;
+
+// FIXME: there is quite a bit of hardcoding in this part of the code, would benefit from setting up separate CSS
+// and getting rid of the hard-coding.
+
+        this.actor = new St.Bin({style_class: "switcher-list", style: "margin: 0px; padding: 8px;"});
+        this.actor.show_on_set_parent = false;
+
+        this.scaleFactor = St.ThemeContext.get_for_stage(global.stage).scale_factor;
+
+        this.actor.set_size(WINDOW_PREVIEW_WIDTH * 1.2 * this.scaleFactor, WINDOW_PREVIEW_HEIGHT * 1.2 * this.scaleFactor);
+        Main.uiGroup.add_actor(this.actor);
+
         this.metaWindow = metaWindow;
         this.muffinWindow = null;
         this._sizeChangedId = null;
 
-        this.actor = new St.BoxLayout({ vertical: true, style_class: "window-list-preview", important: true });
-        this.actor.show_on_set_parent = false;
-        Main.uiGroup.add_actor(this.actor);
+        let box = new St.BoxLayout({ vertical: true });
+        let hbox = new St.BoxLayout();
+
+        let iconBox = new St.Bin();
+        let tracker = Cinnamon.WindowTracker.get_default();
+        let app = tracker.get_window_app(this.metaWindow);
+        let icon = app ? app.create_icon_texture(16) : new St.Icon({ icon_name: 'application-default-icon', icon_type: St.IconType.FULLCOLOR, icon_size: 16 });
+        iconBox.set_child(icon);
+        hbox.add_actor(iconBox);
 
         this.label = new St.Label();
-        this.labelBin = new St.Bin({ y_align: St.Align.MIDDLE });
-        this.labelBin.set_width(WINDOW_PREVIEW_WIDTH * this.thumbScale * this.uiScale);
-        this.labelBin.add_actor(this.label);
-        this.actor.add_actor(this.labelBin);
-
-        if (!showLabel) {
-            this.labelBin.hide();
-        }
+        this.label.style = "padding: 2px;";
+        hbox.add_actor(this.label);
+        box.add_actor(hbox);
 
         this.thumbnailBin = new St.Bin();
-        this.actor.add_actor(this.thumbnailBin);
+        box.add_actor(this.thumbnailBin);
+
+        this.actor.set_child(box);
     },
 
     _onEnterEvent: function(actor, event) {
@@ -113,14 +126,6 @@ WindowPreview.prototype = {
             this._showTimer = Mainloop.timeout_add(300, Lang.bind(this, this._onShowTimerComplete));
 
         this.mousePosition = event.get_coords();
-    },
-
-    _getScaledTextureSize: function(windowTexture) {
-        let [width, height] = windowTexture.get_size();
-        let scale = this.thumbScale * this.uiScale *
-                    Math.min(WINDOW_PREVIEW_WIDTH / width, WINDOW_PREVIEW_HEIGHT / height);
-        return [ width * scale,
-                 height * scale ];
     },
 
     _hide: function(actor, event) {
@@ -134,7 +139,10 @@ WindowPreview.prototype = {
 
         this.muffinWindow = this.metaWindow.get_compositor_private();
         let windowTexture = this.muffinWindow.get_texture();
-        let [width, height] = this._getScaledTextureSize(windowTexture);
+        let [width, height] = windowTexture.get_size();
+        // the 18 is 16 for the icon size + 2px min padding
+        // this is not foolproof - the font used might be large enough to make the label bigger than the icon
+        let scale = Math.min(1.0, WINDOW_PREVIEW_WIDTH / width, (WINDOW_PREVIEW_HEIGHT-18) / height);
 
         if (this.thumbnail) {
             this.thumbnailBin.set_child(null);
@@ -143,15 +151,17 @@ WindowPreview.prototype = {
 
         this.thumbnail = new Clutter.Clone({
             source: windowTexture,
-            width: width,
-            height: height
+            width: width * scale * this.scaleFactor,
+            height: height * scale * this.scaleFactor
         });
 
+        this._setSize = function() {
+            [width, height] = windowTexture.get_size();
+            scale = Math.min(1.0, WINDOW_PREVIEW_WIDTH / width, (WINDOW_PREVIEW_HEIGHT-18) / height);
+            this.thumbnail.set_size(width * scale * this.scaleFactor, height * scale * this.scaleFactor);
+        };
         this._sizeChangedId = this.muffinWindow.connect('size-changed',
-            Lang.bind(this, function() {
-                let [width, height] = this._getScaledTextureSize(windowTexture);
-                this.thumbnail.set_size(width, height);
-            }));
+            Lang.bind(this, this._setSize));
 
         this.thumbnailBin.set_child(this.thumbnail);
 
@@ -247,7 +257,6 @@ AppMenuButton.prototype = {
         this.metaWindow = metaWindow;
         this.alert = alert;
         this.labelVisible = false;
-        this.window_signals = new SignalManager.SignalManager(null);
 
         if (this._applet.orientation == St.Side.TOP)
             this.actor.add_style_class_name('top');
@@ -286,6 +295,13 @@ AppMenuButton.prototype = {
 
         this._iconBottomClip = 0;
         this._visible = true;
+
+        this._updateCaptionId = this.metaWindow.connect('notify::title',
+                Lang.bind(this, this.setDisplayTitle));
+        this._updateTileTypeId = this.metaWindow.connect('notify::tile-type',
+                Lang.bind(this, this.setDisplayTitle));
+        this._updateIconId = this.metaWindow.connect('notify::icon',
+                Lang.bind(this, this.setIcon));
 
         this._progress = 0;
 
@@ -331,7 +347,6 @@ AppMenuButton.prototype = {
         global.settings.connect('changed::panel-edit-mode', Lang.bind(this, this.onPanelEditModeChanged));
 
         this._windows = this._applet._windows;
-
         this.scrollConnector = null;
         this.onScrollModeChanged();
         this._needsAttention = false;
@@ -342,18 +357,6 @@ AppMenuButton.prototype = {
 
         if (this.alert)
             this.getAttention();
-
-        this.window_signals.connect(this.metaWindow, 'notify::title', this.setDisplayTitle, this);
-        this.window_signals.connect(this.metaWindow, "notify::minimized", this.setDisplayTitle, this);
-        this.window_signals.connect(this.metaWindow, "notify::tile-type", this.setDisplayTitle, this);
-        this.window_signals.connect(this.metaWindow, "notify::icon", this.setIcon, this);
-        this.window_signals.connect(this.metaWindow, "notify::appears-focused", this.onFocus, this);
-        this.window_signals.connect(this.metaWindow, "unmanaged", this.onUnmanaged, this);
-    },
-
-    onUnmanaged: function() {
-        this.destroy();
-        this._windows.splice(this._windows.indexOf(this), 1);
     },
 
     onPreviewChanged: function() {
@@ -361,7 +364,7 @@ AppMenuButton.prototype = {
             this._tooltip.destroy();
 
         if (this._applet.usePreview)
-            this._tooltip = new WindowPreview(this, this.metaWindow, this._applet.previewScale, this._applet.showLabel);
+            this._tooltip = new WindowPreview(this, this.metaWindow, this._applet.orientation);
         else
             this._tooltip = new Tooltips.PanelItemTooltip(this, "", this._applet.orientation);
 
@@ -507,7 +510,9 @@ AppMenuButton.prototype = {
     },
 
     destroy: function() {
-        this.window_signals.disconnectAllSignals();
+        this.metaWindow.disconnect(this._updateCaptionId);
+        this.metaWindow.disconnect(this._updateTileTypeId);
+        this.metaWindow.disconnect(this._updateIconId);
         this._tooltip.destroy();
         if (this.rightClickMenu) {
             this.rightClickMenu.destroy();
@@ -749,7 +754,7 @@ AppMenuButton.prototype = {
             this.iconSize = HORIZONTAL_ICON_SIZE;
 
         let icon = app ?
-            app.create_icon_texture_for_window(this.iconSize, this.metaWindow) :
+            app.create_icon_texture(this.iconSize) :
             new St.Icon({ icon_name: 'application-default-icon',
                 icon_type: St.IconType.FULLCOLOR,
                 icon_size: this.iconSize });
@@ -982,8 +987,6 @@ MyApplet.prototype = {
     _init: function(orientation, panel_height, instance_id) {
         Applet.Applet.prototype._init.call(this, orientation, panel_height, instance_id);
 
-        this.signals = new SignalManager.SignalManager(null);
-
         this.setAllowedLayout(Applet.AllowedLayout.BOTH);
 
         this.actor.set_track_hover(false);
@@ -1016,21 +1019,31 @@ MyApplet.prototype = {
         this.settings = new Settings.AppletSettings(this, "window-list@cinnamon.org", this.instance_id);
 
         this.settings.bind("show-all-workspaces", "showAllWorkspaces");
+        this.settings.bind("show-all-screens", "showAllScreens");
         this.settings.bind("enable-alerts", "enableAlerts", this._updateAttentionGrabber);
         this.settings.bind("enable-scrolling", "scrollable", this._onEnableScrollChanged);
         this.settings.bind("reverse-scrolling", "reverseScroll");
         this.settings.bind("middle-click-close", "middleClickClose");
         this.settings.bind("buttons-use-entire-space", "buttonsUseEntireSpace", this._refreshAllItems);
         this.settings.bind("window-preview", "usePreview", this._onPreviewChanged);
-        this.settings.bind("window-preview-show-label", "showLabel", this._onPreviewChanged);
-        this.settings.bind("window-preview-scale", "previewScale", this._onPreviewChanged);
 
-        this.signals.connect(global.screen, 'window-added', this._onWindowAddedAsync, this);
+        this.signals = new SignalManager.SignalManager(null);
+
+        let tracker = Cinnamon.WindowTracker.get_default();
+        this.signals.connect(tracker, "notify::focus-app", this._onFocus, this);
+        this.signals.connect(global.screen, 'window-added', this._onWindowAdded, this);
+        this.signals.connect(global.screen, 'window-removed', this._onWindowRemoved, this);
         this.signals.connect(global.screen, 'window-monitor-changed', this._onWindowMonitorChanged, this);
         this.signals.connect(global.screen, 'window-workspace-changed', this._onWindowWorkspaceChanged, this);
         this.signals.connect(global.screen, 'window-skip-taskbar-changed', this._onWindowSkipTaskbarChanged, this);
         this.signals.connect(global.screen, 'monitors-changed', this._updateWatchedMonitors, this);
         this.signals.connect(global.window_manager, 'switch-workspace', this._refreshAllItems, this);
+
+        this.signals.connect(global.window_manager, 'minimize', this._onWindowStateChange, this);
+        this.signals.connect(global.window_manager, 'maximize', this._onWindowStateChange, this);
+        this.signals.connect(global.window_manager, 'unmaximize', this._onWindowStateChange, this);
+        this.signals.connect(global.window_manager, 'map', this._onWindowStateChange, this);
+        this.signals.connect(global.window_manager, 'tile', this._onWindowStateChange, this);
 
         this.actor.connect('style-changed', Lang.bind(this, this._updateSpacing));
 
@@ -1116,13 +1129,13 @@ MyApplet.prototype = {
         this.manager.set_spacing(spacing * global.ui_scale);
     },
 
-    _onWindowAddedAsync: function(screen, metaWindow, monitor) {
-        Mainloop.timeout_add(20, Lang.bind(this, this._onWindowAdded, screen, metaWindow, monitor));
-    },
-
     _onWindowAdded: function(screen, metaWindow, monitor) {
         if (this._shouldAdd(metaWindow))
             this._addWindow(metaWindow, false);
+    },
+
+    _onWindowRemoved: function(screen, metaWindow) {
+        this._removeWindow(metaWindow);
     },
 
     _onWindowMonitorChanged: function(screen, metaWindow, monitor) {
@@ -1187,6 +1200,11 @@ MyApplet.prototype = {
             this._addWindow(window, true);
     },
 
+    _onFocus: function() {
+        for (let window of this._windows)
+            window.onFocus();
+    },
+
     _refreshItem: function(window) {
         window.actor.visible =
             (window.metaWindow.get_workspace() == global.screen.get_active_workspace()) ||
@@ -1205,6 +1223,7 @@ MyApplet.prototype = {
         for (let window of this._windows) {
             this._refreshItem(window);
         }
+        this._onFocus();
     },
 
     _reTitleItems: function() {
@@ -1213,12 +1232,32 @@ MyApplet.prototype = {
         }
     },
 
+    _onWindowStateChange: function(cinnamonwm, actor) {
+        for (let window of this._windows)
+            if (window.metaWindow == actor.metaWindow)
+                window.setDisplayTitle();
+    },
+
+    // Used by windowManager for traditional minimize and map effect
+    getOriginFromWindow: function(metaWindow) {
+        for (let window of this._windows)
+            if (window.metaWindow == metaWindow)
+                return window.actor;
+
+        return false;
+    },
+
     _updateWatchedMonitors: function() {
         let n_mons = Gdk.Screen.get_default().get_n_monitors();
         let on_primary = this.panel.monitorIndex == Main.layoutManager.primaryIndex;
         let instances = Main.AppletManager.getRunningInstancesForUuid(this._uuid);
 
         /* Simple cases */
+        if(this.showAllScreens){
+            this._monitorWatchList = [];
+            for (let i = 0; i < n_mons; i++)
+                    this._monitorWatchList.push(i);
+        }else
         if (n_mons == 1) {
             this._monitorWatchList = [Main.layoutManager.primaryIndex];
         } else if (instances.length > 1 && !on_primary) {
@@ -1271,7 +1310,6 @@ MyApplet.prototype = {
         this.manager_container.add_actor(appButton.actor);
 
         this._windows.push(appButton);
-
         /* We want to make the AppMenuButtons look like they are ordered by
          * workspace. So if we add an AppMenuButton for a window in another
          * workspace, put it in the right position. It is at the end by
